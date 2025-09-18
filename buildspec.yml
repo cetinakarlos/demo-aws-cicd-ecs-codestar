@@ -1,0 +1,85 @@
+version: 0.2
+
+env:
+  variables:
+    AWS_REGION: us-east-1
+    REPO_NAME: demo-aws-cicd-ecs-codestar
+
+phases:
+  pre_build:
+    commands:
+      - echo "SRC=$CODEBUILD_SRC_DIR" || true
+      - ls -la
+      - aws --version
+      - aws sts get-caller-identity
+      - export ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      - export REPO_URI="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${REPO_NAME}"
+      # crea el repo si no existe
+      - aws ecr describe-repositories --repository-names "$REPO_NAME" --region "$AWS_REGION" >/dev/null 2>&1 || \
+        aws ecr create-repository --repository-name "$REPO_NAME" \
+          --image-scanning-configuration scanOnPush=true \
+          --encryption-configuration encryptionType=AES256 \
+          --region "$AWS_REGION"
+      # login
+      - aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+      # tag seguro
+      - RAW_TAG="${CODEBUILD_RESOLVED_SOURCE_VERSION:-latest}"
+      - export IMAGE_TAG=$(printf '%.12s' "$RAW_TAG" | tr -cd '[:alnum:]._-')
+      - export IMAGE_URI="${REPO_URI}:${IMAGE_TAG}"
+      # defaults de roles (sin YAML raro)
+      - export EXEC_ROLE_NAME=${EXEC_ROLE_NAME:-ecsTaskExecutionRole}
+      - export TASK_ROLE_NAME=${TASK_ROLE_NAME:-}
+      - echo "DEBUG(pre) REPO_URI=$REPO_URI IMAGE_TAG=$IMAGE_TAG IMAGE_URI=$IMAGE_URI EXEC_ROLE_NAME=$EXEC_ROLE_NAME TASK_ROLE_NAME=${TASK_ROLE_NAME:-<empty>}"
+      - test -n "$REPO_URI" && test -n "$IMAGE_TAG" && test -n "$IMAGE_URI"
+
+  build:
+    commands:
+      # reconstituye por si el shell cambia
+      - IMAGE_URI="${REPO_URI}:${IMAGE_TAG}"
+      - echo "DEBUG(build) IMAGE_URI=$IMAGE_URI"
+      - test -n "$IMAGE_URI"
+      - ls -la ./app
+      - DOCKER_BUILDKIT=1 docker build --progress=plain -t "$IMAGE_URI" -t "${REPO_URI}:latest" ./app
+
+  post_build:
+    commands:
+      - docker push "$IMAGE_URI"
+      - docker push "${REPO_URI}:latest"
+
+      # === ARNs de roles SIN llamar a iam:GetRole ===
+      - export EXEC_ROLE_NAME=${EXEC_ROLE_NAME:-ecsTaskExecutionRole}
+      - export TASK_ROLE_NAME=${TASK_ROLE_NAME:-}   # déjalo vacío si no usas task role
+      - export EXEC_ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/${EXEC_ROLE_NAME}"
+      - echo "EXEC_ROLE_ARN=$EXEC_ROLE_ARN"
+      - |
+        if [ -n "$TASK_ROLE_NAME" ]; then
+          TASK_ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/${TASK_ROLE_NAME}"
+          echo "TASK_ROLE_ARN=$TASK_ROLE_ARN"
+        fi
+
+      # === Inyectar imagen + roles en taskdef.json (Blue/Green con CodeDeployToECS) ===
+      - |
+        if [ -n "${TASK_ROLE_NAME}" ]; then
+          jq --arg IMG "$IMAGE_URI" --arg EXEC "$EXEC_ROLE_ARN" --arg TASK "$TASK_ROLE_ARN" '
+            .executionRoleArn=$EXEC
+            | .taskRoleArn=$TASK
+            | .containerDefinitions |= (map(if .name=="app" then .image=$IMG else . end))
+          ' taskdef.json > taskdef.json.tmp
+        else
+          jq --arg IMG "$IMAGE_URI" --arg EXEC "$EXEC_ROLE_ARN" '
+            .executionRoleArn=$EXEC
+            | del(.taskRoleArn)
+            | .containerDefinitions |= (map(if .name=="app" then .image=$IMG else . end))
+          ' taskdef.json > taskdef.json.tmp
+        fi
+      - mv taskdef.json.tmp taskdef.json
+
+      # Guardas anti-placeholder
+      - '! grep -E "REPLACED_IF_USED|REPLACED_BY_TERRAFORM" taskdef.json || (echo "❌ taskdef.json contiene placeholders" >&2; exit 1)'
+      - jq -r '.family, .executionRoleArn, (.taskRoleArn // "no-task-role")' taskdef.json
+
+
+artifacts:
+  files:
+    - appspec.json
+    - taskdef.json

@@ -1,0 +1,25 @@
+{
+  "family": "demo-cicd-ecs",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "256",
+  "memory": "512",
+  "taskRoleArn": "arn:aws:iam::1111111111:role/demo-ecs-service-task-role",
+  "executionRoleArn": "arn:aws:iam::11111111111:role/ecsTaskExecutionRole",
+  "containerDefinitions": [
+    {
+      "name": "app",
+      "image": "11111111111.dkr.ecr.us-east-1.amazonaws.com/demo-aws-cicd-ecs-codestar:latest",
+      "essential": true,
+      "portMappings": [{ "containerPort": 3000 }],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/codestar",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "ecs"
+        }
+      }
+    }
+  ]
+}
