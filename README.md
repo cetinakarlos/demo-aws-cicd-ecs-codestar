@@ -13,7 +13,7 @@ Infrastructure is defined with **Terraform**. Source comes from **GitHub** via *
 
 ---
 
-## 📊 Arquitectura
+## 📊 Architecture
 
 ![Arquitectura](./assets/diagram.svg)
 
